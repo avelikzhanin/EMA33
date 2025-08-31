@@ -70,6 +70,7 @@ class TradingBot:
         self.active_signals: Dict[str, Signal] = {}
         self.instruments_cache: Dict[str, str] = {}  # ticker -> figi
         self.subscribers: Set[int] = set()  # Подписанные пользователи
+        self.start_time = datetime.now()
         
         # Добавляем обработчики команд
         self.application.add_handler(CommandHandler("start", self.start_command))
@@ -78,7 +79,7 @@ class TradingBot:
         self.application.add_handler(CommandHandler("status", self.status_command))
         self.application.add_handler(CommandHandler("signals", self.signals_command))
         self.application.add_handler(CommandHandler("help", self.help_command))
-        
+
     async def start_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Обработчик команды /start"""
         welcome_message = """
@@ -126,7 +127,7 @@ class TradingBot:
         """Статус бота"""
         active_signals_count = len(self.active_signals)
         subscribers_count = len(self.subscribers)
-        uptime = datetime.now() - getattr(self, 'start_time', datetime.now())
+        uptime = datetime.now() - self.start_time
         
         status_message = f"""
 📊 <b>Статус бота:</b>
@@ -183,6 +184,8 @@ SBER, GAZP, LKOH, YNDX, GMKN, NVTK, ROSN, MTSS, MGNT, PLZL
 Бот предоставляет только информационные сигналы для анализа. Все торговые решения вы принимаете самостоятельно!
         """
         await update.message.reply_text(help_message, parse_mode='HTML')
+
+    async def initialize(self):
         """Инициализация бота и кэширование инструментов"""
         try:
             async with Client(self.tinkoff_token) as client:
@@ -193,11 +196,30 @@ SBER, GAZP, LKOH, YNDX, GMKN, NVTK, ROSN, MTSS, MGNT, PLZL
                         self.instruments_cache[instrument.ticker] = instrument.figi
                         
             logger.info(f"Инициализация завершена. Найдено инструментов: {len(self.instruments_cache)}")
-            await self.send_telegram_message("🤖 Торговый бот запущен и готов к работе!")
             
         except Exception as e:
             logger.error(f"Ошибка инициализации: {e}")
-            await self.send_telegram_message(f"❌ Ошибка инициализации: {str(e)}")
+
+    async def broadcast_message(self, message: str):
+        """Отправка сообщения всем подписчикам"""
+        if not self.subscribers:
+            return
+            
+        failed_sends = []
+        for chat_id in self.subscribers.copy():
+            try:
+                await self.application.bot.send_message(
+                    chat_id=chat_id,
+                    text=message,
+                    parse_mode='HTML'
+                )
+            except Exception as e:
+                logger.warning(f"Не удалось отправить сообщение {chat_id}: {e}")
+                failed_sends.append(chat_id)
+                
+        # Удаляем неактивных пользователей
+        for chat_id in failed_sends:
+            self.subscribers.discard(chat_id)
 
     async def get_candles(self, figi: str, interval: CandleInterval, days: int = 2) -> pd.DataFrame:
         """Получение свечных данных"""
@@ -350,10 +372,6 @@ SBER, GAZP, LKOH, YNDX, GMKN, NVTK, ROSN, MTSS, MGNT, PLZL
         except Exception as e:
             logger.error(f"Ошибка анализа {ticker}: {e}")
             return None
-
-    async def send_telegram_message(self, message: str):
-        """Обратная совместимость - теперь использует broadcast_message"""
-        await self.broadcast_message(message)
 
     def format_signal_message(self, signal: Signal) -> str:
         """Форматирование сообщения с сигналом"""
