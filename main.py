@@ -4,7 +4,7 @@ import logging
 from datetime import datetime, timedelta
 import pandas as pd
 import numpy as np
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Set
 import aiohttp
 import json
 from dataclasses import dataclass
@@ -12,7 +12,8 @@ from enum import Enum
 
 # Telegram Bot
 import telegram
-from telegram import Bot
+from telegram import Update, Bot
+from telegram.ext import Application, CommandHandler, ContextTypes
 
 # Tinkoff Invest API
 from tinkoff.invest import Client, RequestError, MarketDataRequest, GetCandlesRequest
@@ -64,13 +65,124 @@ class TradingBot:
     def __init__(self):
         self.tinkoff_token = os.getenv('TINKOFF_TOKEN')
         self.telegram_token = os.getenv('TELEGRAM_BOT_TOKEN')
-        self.telegram_chat_id = os.getenv('TELEGRAM_CHAT_ID')
         
-        self.bot = Bot(token=self.telegram_token)
+        self.application = Application.builder().token(self.telegram_token).build()
         self.active_signals: Dict[str, Signal] = {}
         self.instruments_cache: Dict[str, str] = {}  # ticker -> figi
+        self.subscribers: Set[int] = set()  # Подписанные пользователи
         
-    async def initialize(self):
+        # Добавляем обработчики команд
+        self.application.add_handler(CommandHandler("start", self.start_command))
+        self.application.add_handler(CommandHandler("subscribe", self.subscribe_command))
+        self.application.add_handler(CommandHandler("unsubscribe", self.unsubscribe_command))
+        self.application.add_handler(CommandHandler("status", self.status_command))
+        self.application.add_handler(CommandHandler("signals", self.signals_command))
+        self.application.add_handler(CommandHandler("help", self.help_command))
+        
+    async def start_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Обработчик команды /start"""
+        welcome_message = """
+🤖 <b>Добро пожаловать в Trading Bot!</b>
+
+Я анализирую топ-10 акций Мосбиржи и отправляю торговые сигналы по стратегии пробоя EMA33.
+
+<b>Доступные команды:</b>
+/start - Показать это сообщение
+/subscribe - Подписаться на сигналы
+/unsubscribe - Отписаться от сигналов
+/status - Статус бота и количество подписчиков
+/signals - Показать активные сигналы
+/help - Подробная помощь
+
+<b>Для начала используйте:</b> /subscribe
+        """
+        await update.message.reply_text(welcome_message, parse_mode='HTML')
+
+    async def subscribe_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Подписка на сигналы"""
+        user_id = update.effective_user.id
+        if user_id not in self.subscribers:
+            self.subscribers.add(user_id)
+            await update.message.reply_text(
+                "✅ <b>Вы подписались на торговые сигналы!</b>\n\n"
+                "Теперь вы будете получать уведомления о новых сигналах и их статусе.",
+                parse_mode='HTML'
+            )
+            logger.info(f"Новый подписчик: {user_id}")
+        else:
+            await update.message.reply_text("ℹ️ Вы уже подписаны на сигналы.")
+
+    async def unsubscribe_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Отписка от сигналов"""
+        user_id = update.effective_user.id
+        if user_id in self.subscribers:
+            self.subscribers.remove(user_id)
+            await update.message.reply_text("❌ <b>Вы отписались от торговых сигналов.</b>", parse_mode='HTML')
+            logger.info(f"Отписался: {user_id}")
+        else:
+            await update.message.reply_text("ℹ️ Вы не были подписаны на сигналы.")
+
+    async def status_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Статус бота"""
+        active_signals_count = len(self.active_signals)
+        subscribers_count = len(self.subscribers)
+        uptime = datetime.now() - getattr(self, 'start_time', datetime.now())
+        
+        status_message = f"""
+📊 <b>Статус бота:</b>
+
+👥 <b>Подписчиков:</b> {subscribers_count}
+🚨 <b>Активных сигналов:</b> {active_signals_count}
+⏰ <b>Время работы:</b> {str(uptime).split('.')[0]}
+📈 <b>Отслеживаемые акции:</b> {len(TOP_MOEX_STOCKS)}
+
+<b>Инструменты:</b> {', '.join(TOP_MOEX_STOCKS)}
+        """
+        await update.message.reply_text(status_message, parse_mode='HTML')
+
+    async def signals_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Показать активные сигналы"""
+        if not self.active_signals:
+            await update.message.reply_text("📭 <b>Активных сигналов нет.</b>", parse_mode='HTML')
+            return
+
+        message = "🔔 <b>Активные сигналы:</b>\n\n"
+        for ticker, signal in self.active_signals.items():
+            age = datetime.now() - signal.signal_time
+            message += f"📊 <b>{ticker}</b>\n"
+            message += f"💰 Вход: {signal.entry_price:.2f} ₽\n"
+            message += f"⏰ {age.seconds//3600}ч {(age.seconds//60)%60}м назад\n\n"
+
+        await update.message.reply_text(message, parse_mode='HTML')
+
+    async def help_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Подробная помощь"""
+        help_message = """
+📚 <b>Подробная информация о боте</b>
+
+<b>🎯 Стратегия торговли:</b>
+1. Отскок от уровня поддержки
+2. Пробой EMA33 вверх
+3. Ретест EMA33
+4. Отложенный ордер на пробой локального максимума
+
+<b>📊 Управление позицией:</b>
+• TP1 (1/3): При R/R 1:1 → SL в безубыток
+• TP2 (1/3): При R/R 1:2 → SL на уровень TP1
+• TP3 (1/3): При R/R 1:3 → полное закрытие
+
+<b>⏰ Режим работы:</b>
+• Сканирование: каждые 5 минут
+• Торговое время: 10:00-18:30 МСК
+• Таймфрейм: 1 час
+
+<b>📈 Отслеживаемые акции:</b>
+SBER, GAZP, LKOH, YNDX, GMKN, NVTK, ROSN, MTSS, MGNT, PLZL
+
+<b>⚠️ Важно:</b>
+Бот предоставляет только информационные сигналы для анализа. Все торговые решения вы принимаете самостоятельно!
+        """
+        await update.message.reply_text(help_message, parse_mode='HTML')
         """Инициализация бота и кэширование инструментов"""
         try:
             async with Client(self.tinkoff_token) as client:
@@ -240,15 +352,8 @@ class TradingBot:
             return None
 
     async def send_telegram_message(self, message: str):
-        """Отправка сообщения в Telegram"""
-        try:
-            await self.bot.send_message(
-                chat_id=self.telegram_chat_id,
-                text=message,
-                parse_mode='HTML'
-            )
-        except Exception as e:
-            logger.error(f"Ошибка отправки в Telegram: {e}")
+        """Обратная совместимость - теперь использует broadcast_message"""
+        await self.broadcast_message(message)
 
     def format_signal_message(self, signal: Signal) -> str:
         """Форматирование сообщения с сигналом"""
@@ -305,7 +410,7 @@ class TradingBot:
                     # Новый сигнал найден
                     self.active_signals[ticker] = signal
                     message = self.format_signal_message(signal)
-                    await self.send_telegram_message(message)
+                    await self.broadcast_message(message)
                     signals_found += 1
                     logger.info(f"Новый сигнал: {ticker} @ {signal.entry_price}")
                     
@@ -344,7 +449,7 @@ class TradingBot:
 
 Позиция открыта! Следите за уровнями TP.
                     """
-                    await self.send_telegram_message(message.strip())
+                    await self.broadcast_message(message.strip())
                     
                 # Проверяем достижение TP уровней
                 if current_price >= signal.take_profit_1:
@@ -357,7 +462,7 @@ class TradingBot:
 
 Закрыть 1/3 позиции и переставить SL в безубыток!
                     """
-                    await self.send_telegram_message(message.strip())
+                    await self.broadcast_message(message.strip())
                     
             except Exception as e:
                 logger.error(f"Ошибка мониторинга {ticker}: {e}")
@@ -392,16 +497,26 @@ class TradingBot:
                     
             except Exception as e:
                 logger.error(f"Ошибка в основном цикле: {e}")
-                await self.send_telegram_message(f"⚠️ Ошибка в боте: {str(e)}")
                 
             # Пауза между циклами сканирования
             await asyncio.sleep(300)  # 5 минут
+
+    async def start_bot(self):
+        """Запуск Telegram бота"""
+        await self.application.initialize()
+        await self.application.start()
+        
+        # Запускаем polling в отдельной задаче
+        polling_task = asyncio.create_task(self.application.updater.start_polling())
+        scanner_task = asyncio.create_task(self.run_scanner())
+        
+        await asyncio.gather(polling_task, scanner_task)
 
 # Основной файл для запуска
 async def main():
     """Основная функция"""
     # Проверяем переменные окружения
-    required_vars = ['TINKOFF_TOKEN', 'TELEGRAM_BOT_TOKEN', 'TELEGRAM_CHAT_ID']
+    required_vars = ['TINKOFF_TOKEN', 'TELEGRAM_BOT_TOKEN']
     missing_vars = [var for var in required_vars if not os.getenv(var)]
     
     if missing_vars:
@@ -410,7 +525,44 @@ async def main():
         
     bot = TradingBot()
     await bot.initialize()
-    await bot.run_scanner()
+    await bot.start_bot()
 
 if __name__ == "__main__":
     asyncio.run(main())
+
+# requirements.txt для Railway:
+"""
+tinkoff-investments>=0.2.0b0
+pandas>=2.0.0
+numpy>=1.24.0
+aiohttp>=3.8.0
+python-telegram-bot>=20.0
+asyncio-mqtt>=0.11.0
+"""
+
+# Dockerfile для Railway:
+"""
+FROM python:3.11-slim
+
+WORKDIR /app
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY . .
+
+CMD ["python", "main.py"]
+"""
+
+# railway.json для конфигурации:
+"""
+{
+  "build": {
+    "builder": "DOCKERFILE"
+  },
+  "deploy": {
+    "startCommand": "python main.py",
+    "restartPolicyType": "ON_FAILURE"
+  }
+}
+"""
