@@ -259,18 +259,16 @@ SBER, GAZP, LKOH, YNDX, GMKN, NVTK, ROSN, MTSS, MGNT, PLZL
     async def get_candles(self, figi: str, interval: CandleInterval, days: int = 2) -> pd.DataFrame:
         """Получение свечных данных"""
         try:
-            async with Client(self.tinkoff_token) as client:
+            with Client(self.tinkoff_token) as client:
                 from_time = now() - timedelta(days=days)
                 to_time = now()
                 
-                request = GetCandlesRequest(
+                candles = client.market_data.get_candles(
                     figi=figi,
                     from_=from_time,
                     to=to_time,
                     interval=interval
                 )
-                
-                candles = await client.market_data.get_candles(request=request)
                 
                 data = []
                 for candle in candles.candles:
