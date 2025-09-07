@@ -41,15 +41,15 @@ class Signal:
     risk_reward_1: float
     risk_reward_2: float
     risk_reward_3: float
-    local_high: float  # Добавляем для отслеживания локального максимума
-    local_low: float   # Добавляем для отслеживания локального минимума
+    local_high: float
+    local_low: float
 
 class SignalStatus(Enum):
     WAITING = "waiting"
     TRIGGERED = "triggered"
     CLOSED = "closed"
 
-# Топ-10 акций Мосбиржи (тикеры для Tinkoff API)
+# Топ-10 акций Мосбиржи
 TOP_MOEX_STOCKS = [
     "SBER",    # Сбербанк
     "GAZP",    # Газпром
@@ -70,12 +70,10 @@ class TradingBot:
         
         self.application = Application.builder().token(self.telegram_token).build()
         self.active_signals: Dict[str, Signal] = {}
-        self.instruments_cache: Dict[str, str] = {}  # ticker -> figi
-        self.subscribers: Set[int] = set()  # Подписанные пользователи
+        self.instruments_cache: Dict[str, str] = {}
+        self.subscribers: Set[int] = set()
         self.start_time = datetime.now()
-        
-        # Отслеживание пробоев EMA для каждого инструмента
-        self.ema_breakouts: Dict[str, dict] = {}  # ticker -> {'time': datetime, 'price': float}
+        self.ema_breakouts: Dict[str, dict] = {}
         
         # Добавляем обработчики команд
         self.application.add_handler(CommandHandler("start", self.start_command))
@@ -228,7 +226,6 @@ SBER, GAZP, LKOH, YNDX, GMKN, NVTK, ROSN, MTSS, MGNT, PLZL
         """Инициализация бота и кэширование инструментов"""
         try:
             async with Client(self.tinkoff_token) as client:
-                # Получаем информацию об инструментах
                 instruments = await client.instruments.shares()
                 for instrument in instruments.instruments:
                     if instrument.ticker in TOP_MOEX_STOCKS:
@@ -256,7 +253,6 @@ SBER, GAZP, LKOH, YNDX, GMKN, NVTK, ROSN, MTSS, MGNT, PLZL
                 logger.warning(f"Не удалось отправить сообщение {chat_id}: {e}")
                 failed_sends.append(chat_id)
                 
-        # Удаляем неактивных пользователей
         for chat_id in failed_sends:
             self.subscribers.discard(chat_id)
 
@@ -308,11 +304,9 @@ SBER, GAZP, LKOH, YNDX, GMKN, NVTK, ROSN, MTSS, MGNT, PLZL
         lows = []
         
         for i in range(window, len(df) - window):
-            # Локальный максимум
             if df['high'].iloc[i] == df['high'].iloc[i-window:i+window+1].max():
                 highs.append((i, df['high'].iloc[i]))
             
-            # Локальный минимум
             if df['low'].iloc[i] == df['low'].iloc[i-window:i+window+1].min():
                 lows.append((i, df['low'].iloc[i]))
                 
@@ -325,13 +319,11 @@ SBER, GAZP, LKOH, YNDX, GMKN, NVTK, ROSN, MTSS, MGNT, PLZL
             
         df['ema33'] = self.calculate_ema(df['close'], ema_period)
         
-        # Проверяем последние 10 свечей на пробой (увеличено с 5)
         for i in range(-10, 0):
             try:
-                # Проверяем пробой: предыдущая свеча закрылась ниже EMA, текущая выше
                 if (df.iloc[i-1]['close'] <= df.iloc[i-1]['ema33'] and 
                     df.iloc[i]['close'] > df.iloc[i]['ema33'] and
-                    df.iloc[i]['volume'] > df['volume'].iloc[i-10:i].mean() * 1.2):  # Объем выше среднего на 20%
+                    df.iloc[i]['volume'] > df['volume'].iloc[i-10:i].mean() * 1.2):
                     
                     return {
                         'index': len(df) + i,
@@ -351,26 +343,21 @@ SBER, GAZP, LKOH, YNDX, GMKN, NVTK, ROSN, MTSS, MGNT, PLZL
                 return None
                 
             breakout_index = breakout_info['index']
-            
-            # Берем данные после пробоя
             post_breakout_df = df.iloc[breakout_index:]
             
-            if len(post_breakout_df) < 5:  # Минимум 5 свечей после пробоя
+            if len(post_breakout_df) < 5:
                 return None
                 
-            # Расчитываем EMA для этого периода
             post_breakout_df['ema33'] = self.calculate_ema(df['close'], 33).iloc[breakout_index:]
-            
-            # Ищем локальные экстремумы
             highs, lows = self.find_local_extremes(post_breakout_df, window=2)
             
             if not highs or not lows:
                 return None
                 
-            # Находим первый значимый локальный максимум (минимум 0.3% от цены пробоя)
             local_high = None
+            local_high_idx = None
             for idx, high_price in highs:
-                if high_price > breakout_info['price'] * 1.003:  # Минимум 0.3% выше
+                if high_price > breakout_info['price'] * 1.003:
                     local_high = high_price
                     local_high_idx = idx
                     break
@@ -378,16 +365,14 @@ SBER, GAZP, LKOH, YNDX, GMKN, NVTK, ROSN, MTSS, MGNT, PLZL
             if not local_high:
                 return None
                 
-            # Ищем локальный минимум после локального максимума
             local_low = None
             local_low_idx = None
             for idx, low_price in lows:
-                if idx > local_high_idx:  # Минимум должен быть после максимума
-                    # Проверяем расстояние от EMA33 (увеличено до 2%)
+                if idx > local_high_idx:
                     ema_at_low = post_breakout_df['ema33'].iloc[idx]
                     distance_to_ema = abs(low_price - ema_at_low) / ema_at_low
                     
-                    if distance_to_ema <= 0.02:  # В пределах 2% от EMA33
+                    if distance_to_ema <= 0.02:
                         local_low = low_price
                         local_low_idx = idx
                         break
@@ -395,8 +380,7 @@ SBER, GAZP, LKOH, YNDX, GMKN, NVTK, ROSN, MTSS, MGNT, PLZL
             if not local_low:
                 return None
                 
-            # Проверяем, что минимум выше EMA33 (подтверждение поддержки)
-            if local_low < post_breakout_df['ema33'].iloc[local_low_idx] * 0.995:  # Допуск 0.5%
+            if local_low < post_breakout_df['ema33'].iloc[local_low_idx] * 0.995:
                 return None
                 
             return {
@@ -412,25 +396,16 @@ SBER, GAZP, LKOH, YNDX, GMKN, NVTK, ROSN, MTSS, MGNT, PLZL
 
     def generate_signal(self, ticker: str, setup_info: dict) -> Signal:
         """Генерация торгового сигнала"""
-        # Вход - пробой локального максимума
-        entry_price = setup_info['local_high'] + (setup_info['local_high'] * 0.001)  # +0.1%
-        
-        # Стоп-лосс - под локальным минимумом
-        stop_loss = setup_info['local_low'] - (setup_info['local_low'] * 0.002)  # -0.2%
-        
-        # Альтернативный стоп-лосс - под EMA33
-        alt_stop_loss = setup_info['ema_at_low'] - (setup_info['ema_at_low'] * 0.005)  # -0.5%
-        
-        # Используем более консервативный (выше расположенный) стоп-лосс
+        entry_price = setup_info['local_high'] + (setup_info['local_high'] * 0.001)
+        stop_loss = setup_info['local_low'] - (setup_info['local_low'] * 0.002)
+        alt_stop_loss = setup_info['ema_at_low'] - (setup_info['ema_at_low'] * 0.005)
         stop_loss = max(stop_loss, alt_stop_loss)
         
-        # Расчет риска
         risk_distance = entry_price - stop_loss
         
-        # Take Profit уровни
-        tp1 = entry_price + risk_distance * 1.0  # R/R 1:1
-        tp2 = entry_price + risk_distance * 2.0  # R/R 1:2
-        tp3 = entry_price + risk_distance * 3.0  # R/R 1:3
+        tp1 = entry_price + risk_distance * 1.0
+        tp2 = entry_price + risk_distance * 2.0
+        tp3 = entry_price + risk_distance * 3.0
         
         return Signal(
             symbol=ticker,
@@ -491,14 +466,11 @@ SBER, GAZP, LKOH, YNDX, GMKN, NVTK, ROSN, MTSS, MGNT, PLZL
                     continue
                     
                 figi = self.instruments_cache[ticker]
-                
-                # Получаем 1-часовые свечи за 7 дней (увеличено для лучшего анализа)
                 df = await self.get_candles(figi, CandleInterval.CANDLE_INTERVAL_HOUR, days=7)
                 
                 if df.empty or len(df) < 50:
                     continue
                 
-                # Проверяем наличие нового пробоя EMA33
                 if ticker not in self.ema_breakouts:
                     breakout_info = self.detect_ema_breakout(df)
                     if breakout_info:
@@ -509,7 +481,6 @@ SBER, GAZP, LKOH, YNDX, GMKN, NVTK, ROSN, MTSS, MGNT, PLZL
                         }
                         logger.info(f"Обнаружен пробой EMA33 для {ticker} @ {breakout_info['price']:.2f}")
                         
-                        # Уведомляем о пробое
                         message = f"""
 📍 <b>Пробой EMA33!</b>
 
@@ -521,29 +492,23 @@ SBER, GAZP, LKOH, YNDX, GMKN, NVTK, ROSN, MTSS, MGNT, PLZL
                         """
                         await self.broadcast_message(message.strip())
                 
-                # Проверяем формирование сетапа для инструментов с пробоем
                 if ticker in self.ema_breakouts and ticker not in self.active_signals:
                     breakout_data = self.ema_breakouts[ticker]
                     
-                    # Проверяем, не слишком ли старый пробой (максимум 48 часов)
                     time_since_breakout = datetime.now() - breakout_data['time']
                     if time_since_breakout > timedelta(hours=48):
                         del self.ema_breakouts[ticker]
                         logger.info(f"Удален устаревший пробой для {ticker}")
                         continue
                     
-                    # Проверяем формирование паттерна
                     setup_info = self.check_setup_formation(df, breakout_data)
                     
                     if setup_info:
-                        # Обновляем информацию о локальных экстремумах
                         self.ema_breakouts[ticker]['local_high'] = setup_info['local_high']
                         self.ema_breakouts[ticker]['local_low'] = setup_info['local_low']
                         
-                        # Генерируем сигнал
                         signal = self.generate_signal(ticker, setup_info)
                         
-                        # Проверяем валидность сигнала
                         if signal.entry_price > setup_info['current_price']:
                             self.active_signals[ticker] = signal
                             message = self.format_signal_message(signal)
@@ -551,10 +516,9 @@ SBER, GAZP, LKOH, YNDX, GMKN, NVTK, ROSN, MTSS, MGNT, PLZL
                             signals_found += 1
                             logger.info(f"Новый сигнал: {ticker} @ {signal.entry_price:.2f}")
                             
-                            # Удаляем из отслеживания пробоев
                             del self.ema_breakouts[ticker]
                     
-                await asyncio.sleep(0.5)  # Пауза между запросами
+                await asyncio.sleep(0.5)
                 
             except Exception as e:
                 logger.error(f"Ошибка сканирования {ticker}: {e}")
@@ -579,7 +543,6 @@ SBER, GAZP, LKOH, YNDX, GMKN, NVTK, ROSN, MTSS, MGNT, PLZL
                 current_price = df['close'].iloc[-1]
                 high_price = df['high'].iloc[-1]
                 
-                # Проверяем срабатывание сигнала
                 if high_price >= signal.entry_price and not hasattr(signal, 'triggered'):
                     signal.triggered = True
                     message = f"""
@@ -593,8 +556,176 @@ SBER, GAZP, LKOH, YNDX, GMKN, NVTK, ROSN, MTSS, MGNT, PLZL
                     """
                     await self.broadcast_message(message.strip())
                     
-                # Проверяем достижение TP уровней (только для сработавших сигналов)
                 if hasattr(signal, 'triggered'):
-                    # TP1
                     if current_price >= signal.take_profit_1 and not hasattr(signal, 'tp1_reached'):
                         signal.tp1_reached = True
+                        message = f"""
+🎯 <b>TP1 ДОСТИГНУТ!</b>
+
+📊 <b>{signal.symbol}</b>
+💰 <b>TP1:</b> {signal.take_profit_1:.2f} ₽
+📈 <b>Текущая цена:</b> {current_price:.2f} ₽
+📊 <b>Прибыль:</b> {((signal.take_profit_1 - signal.entry_price) / signal.entry_price * 100):.1f}%
+
+✅ Закрыть 1/3 позиции
+✅ Переставить SL в безубыток ({signal.entry_price:.2f} ₽)
+                        """
+                        await self.broadcast_message(message.strip())
+                    
+                    if current_price >= signal.take_profit_2 and not hasattr(signal, 'tp2_reached'):
+                        signal.tp2_reached = True
+                        message = f"""
+🎯 <b>TP2 ДОСТИГНУТ!</b>
+
+📊 <b>{signal.symbol}</b>
+💰 <b>TP2:</b> {signal.take_profit_2:.2f} ₽
+📈 <b>Текущая цена:</b> {current_price:.2f} ₽
+📊 <b>Прибыль:</b> {((signal.take_profit_2 - signal.entry_price) / signal.entry_price * 100):.1f}%
+
+✅ Закрыть еще 1/3 позиции
+✅ Переставить SL на уровень TP1 ({signal.take_profit_1:.2f} ₽)
+                        """
+                        await self.broadcast_message(message.strip())
+                    
+                    if current_price >= signal.take_profit_3 and not hasattr(signal, 'tp3_reached'):
+                        signal.tp3_reached = True
+                        message = f"""
+🎯 <b>TP3 ДОСТИГНУТ! ПОЗИЦИЯ ЗАКРЫТА!</b>
+
+📊 <b>{signal.symbol}</b>
+💰 <b>TP3:</b> {signal.take_profit_3:.2f} ₽
+📈 <b>Финальная цена:</b> {current_price:.2f} ₽
+📊 <b>Общая прибыль:</b> {((signal.take_profit_3 - signal.entry_price) / signal.entry_price * 100):.1f}%
+
+✅ Позиция полностью закрыта с прибылью!
+                        """
+                        await self.broadcast_message(message.strip())
+                        del self.active_signals[ticker]
+                        continue
+                    
+                    if current_price <= signal.stop_loss:
+                        message = f"""
+🛑 <b>STOP LOSS СРАБОТАЛ!</b>
+
+📊 <b>{signal.symbol}</b>
+💔 <b>Stop Loss:</b> {signal.stop_loss:.2f} ₽
+📉 <b>Текущая цена:</b> {current_price:.2f} ₽
+📊 <b>Убыток:</b> {((signal.stop_loss - signal.entry_price) / signal.entry_price * 100):.1f}%
+
+❌ Позиция закрыта по стоп-лоссу.
+                        """
+                        await self.broadcast_message(message.strip())
+                        del self.active_signals[ticker]
+                        
+            except Exception as e:
+                logger.error(f"Ошибка мониторинга {ticker}: {e}")
+
+    async def cleanup_old_signals(self):
+        """Очистка старых сигналов (старше 48 часов)"""
+        current_time = datetime.now()
+        to_remove = []
+        
+        for ticker, signal in self.active_signals.items():
+            if current_time - signal.signal_time > timedelta(hours=48):
+                to_remove.append(ticker)
+                
+        for ticker in to_remove:
+            del self.active_signals[ticker]
+            logger.info(f"Удален старый сигнал: {ticker}")
+            
+            message = f"""
+⏰ <b>Сигнал истек</b>
+
+📊 <b>{ticker}</b>
+Сигнал не сработал в течение 48 часов и был удален.
+            """
+            await self.broadcast_message(message.strip())
+
+    async def cleanup_old_breakouts(self):
+        """Очистка старых пробоев EMA33"""
+        current_time = datetime.now()
+        to_remove = []
+        
+        for ticker, breakout_info in self.ema_breakouts.items():
+            if current_time - breakout_info['time'] > timedelta(hours=48):
+                to_remove.append(ticker)
+                
+        for ticker in to_remove:
+            del self.ema_breakouts[ticker]
+            logger.info(f"Удален старый пробой EMA33: {ticker}")
+
+    async def run_scanner(self):
+        """Основной цикл сканирования"""
+        logger.info("Запуск сканера...")
+        
+        while True:
+            try:
+                current_hour = datetime.now().hour
+                current_minute = datetime.now().minute
+                
+                # UTC время (МСК-3)
+                if 7 <= current_hour <= 15 or (current_hour == 15 and current_minute <= 30):
+                    logger.info(f"Сканирование... Время: {datetime.now().strftime('%H:%M:%S')}")
+                    logger.info(f"Активных сигналов: {len(self.active_signals)}, Отслеживаемых пробоев: {len(self.ema_breakouts)}")
+                    
+                    await self.scan_instruments()
+                    await self.monitor_active_signals()
+                    await self.cleanup_old_signals()
+                    await self.cleanup_old_breakouts()
+                else:
+                    logger.info("Вне торгового времени, ожидание...")
+                    
+            except Exception as e:
+                logger.error(f"Ошибка в основном цикле: {e}")
+                
+            await asyncio.sleep(300)  # 5 минут
+
+    async def start_bot(self):
+        """Запуск Telegram бота"""
+        await self.application.initialize()
+        await self.application.start()
+        
+        startup_message = """
+🟢 <b>Бот запущен!</b>
+
+Сканирование рынка активно.
+Используйте /help для получения информации о стратегии.
+        """
+        await self.broadcast_message(startup_message.strip())
+        
+        polling_task = asyncio.create_task(self.application.updater.start_polling())
+        scanner_task = asyncio.create_task(self.run_scanner())
+        
+        try:
+            await asyncio.gather(polling_task, scanner_task)
+        except KeyboardInterrupt:
+            logger.info("Получен сигнал остановки")
+        finally:
+            await self.application.stop()
+
+async def main():
+    """Основная функция"""
+    required_vars = ['TINKOFF_TOKEN', 'TELEGRAM_BOT_TOKEN']
+    missing_vars = [var for var in required_vars if not os.getenv(var)]
+    
+    if missing_vars:
+        logger.error(f"Отсутствуют переменные окружения: {missing_vars}")
+        logger.info("Установите переменные окружения:")
+        logger.info("TINKOFF_TOKEN - токен для Tinkoff Invest API")
+        logger.info("TELEGRAM_BOT_TOKEN - токен вашего Telegram бота")
+        return
+        
+    bot = TradingBot()
+    await bot.initialize()
+    
+    logger.info("=" * 50)
+    logger.info("Trading Bot v2.0 - Улучшенная стратегия")
+    logger.info("=" * 50)
+    logger.info(f"Найдено инструментов: {len(bot.instruments_cache)}")
+    logger.info(f"Отслеживаемые тикеры: {', '.join(bot.instruments_cache.keys())}")
+    logger.info("=" * 50)
+    
+    await bot.start_bot()
+
+if __name__ == "__main__":
+    asyncio.run(main())
