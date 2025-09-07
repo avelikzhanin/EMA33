@@ -703,6 +703,9 @@ SBER, GAZP, LKOH, YNDX, GMKN, NVTK, ROSN, MTSS, MGNT, PLZL
 
 async def main():
     """Основная функция"""
+    # Небольшая задержка для предотвращения конфликтов при перезапуске
+    await asyncio.sleep(2)
+    
     required_vars = ['TINKOFF_TOKEN', 'TELEGRAM_BOT_TOKEN']
     missing_vars = [var for var in required_vars if not os.getenv(var)]
     
@@ -714,13 +717,22 @@ async def main():
         return
         
     bot = TradingBot()
-    await bot.initialize()
+    
+    # Пробуем инициализировать, но продолжаем даже при ошибке
+    try:
+        await bot.initialize()
+    except Exception as e:
+        logger.warning(f"Ошибка при инициализации Tinkoff API: {e}")
+        logger.info("Бот продолжит работу без данных о инструментах")
     
     logger.info("=" * 50)
     logger.info("Trading Bot v2.0 - Улучшенная стратегия")
     logger.info("=" * 50)
     logger.info(f"Найдено инструментов: {len(bot.instruments_cache)}")
-    logger.info(f"Отслеживаемые тикеры: {', '.join(bot.instruments_cache.keys())}")
+    if bot.instruments_cache:
+        logger.info(f"Отслеживаемые тикеры: {', '.join(bot.instruments_cache.keys())}")
+    else:
+        logger.warning("Инструменты не загружены. Проверьте TINKOFF_TOKEN")
     logger.info("=" * 50)
     
     await bot.start_bot()
